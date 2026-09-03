@@ -895,6 +895,13 @@ def create_notifications_from_telemetry(document: Dict[str, Any]) -> None:
             cache_key = f"{device_id}:{lane}:queue_level_2"
 
             if should_send_notification(cache_key):
+                if queue_estimate_cm == 0:
+                    msg_text = f"Jalur {lane_labels[lane]} pada {intersection_id} mencapai Queue Level {level}. Sekitar {queue_vehicles} kendaraan."
+                else:
+                    msg_text = (
+                        f"Jalur {lane_labels[lane]} pada {intersection_id} mencapai Queue Level {level}. "
+                        f"Estimasi antrean {queue_estimate_cm} cm dan sekitar {queue_vehicles} kendaraan."
+                    )
                 save_notification(
                     document=document,
                     notif_type="queue_level_2",
@@ -902,10 +909,7 @@ def create_notifications_from_telemetry(document: Dict[str, Any]) -> None:
                     category="traffic",
                     lane=lane,
                     title=f"Antrean Padat Jalur {lane_labels[lane]}",
-                    message=(
-                        f"Jalur {lane_labels[lane]} pada {intersection_id} mencapai Queue Level {level}. "
-                        f"Estimasi antrean {queue_estimate_cm} cm dan sekitar {queue_vehicles} kendaraan."
-                    ),
+                    message=msg_text,
                     metadata={
                         "queue_level": level,
                         "queue_detected": queue_detected,
