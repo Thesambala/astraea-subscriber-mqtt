@@ -14,5 +14,8 @@ MQTT subscriber: ESP32/CAM_YOLO → DynamoDB + S3 + Telegram/Email.
 4. LOKASI DEPLOY: `/home/ubuntu/traffic-aws-subscriber` di EC2 `astraea-web-mqtt`
    (ap-southeast-2). Setelah ubah kode: copy ke server, `systemctl restart traffic-aws-subscriber`,
    verifikasi via `journalctl -u traffic-aws-subscriber` + publish pesan uji.
-5. REPO TERKAIT: aslamrosul/adaptive-traffic-monitoring (web), Thesambala/yolov8-server (AI),
-   aslamrosul/backup-all (backup full, PRIVATE).
+5. AUTO-PUSH: server ini punya deploy key SSH (`~/.ssh/astraea-sub`, remote `gh-sub`).
+   Selesai mengubah file di `~/workspace/astraea-subscriber-mqtt`: commit lalu
+   `git push` langsung (tanpa token). Lalu sync ke deploy:
+   copy `subscriber_*.py` ke `/home/ubuntu/traffic-aws-subscriber`,
+   `systemctl restart traffic-aws-subscriber`, verifikasi via `journalctl`.
