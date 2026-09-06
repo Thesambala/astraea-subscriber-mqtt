@@ -26,6 +26,15 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USER = os.getenv("MQTT_USER", "")
 MQTT_PASS = os.getenv("MQTT_PASS", "")
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "traffic/+/data")
+# Topik kanonis PRD §25 (selalu disubscribe bersama legacy §26)
+MQTT_TOPIC_V1_TELEMETRY = os.getenv(
+    "MQTT_TOPIC_V1_TELEMETRY", "astraea/v1/intersections/+/controllers/+/telemetry"
+)
+MQTT_TOPIC_V1_VISION = os.getenv(
+    "MQTT_TOPIC_V1_VISION", "astraea/v1/intersections/+/vision/metrics"
+)
+# Persistensi vision sampled (§74): simpan bila berubah ATAU tiap N detik
+VISION_SAMPLE_SECONDS = int(os.getenv("VISION_SAMPLE_SECONDS", "60"))
 
 AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-2")
 
@@ -957,6 +966,112 @@ def extract_device_id_from_topic(topic: str) -> Optional[str]:
     return None
 
 
+def is_canonical_telemetry_topic(topic: str) -> bool:
+    parts = topic.split("/")
+    return (
+        len(parts) >= 7
+        and parts[0] == "astraea"
+        and parts[1] == "v1"
+        and parts[2] == "intersections"
+        and parts[4] == "controllers"
+        and parts[6] == "telemetry"
+    )
+
+
+def is_canonical_vision_topic(topic: str) -> bool:
+    parts = topic.split("/")
+    return (
+        len(parts) >= 6
+        and parts[0] == "astraea"
+        and parts[1] == "v1"
+        and parts[2] == "intersections"
+        and parts[4] == "vision"
+        and parts[5] == "metrics"
+    )
+
+
+def normalize_canonical_telemetry(topic: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Skema kanonis §27 -> bentuk legacy agar pipeline sama (DynamoDB/S3/notif)."""
+    parts = topic.split("/")
+    intersection_id = parts[3] if len(parts) > 3 else payload.get("intersection_id")
+    controller_id = parts[5] if len(parts) > 5 else payload.get("controller_id")
+    flat: Dict[str, Any] = {
+        "schema_version": payload.get("schema_version", 1),
+        "intersection_id": intersection_id,
+        "device_id": controller_id,
+        "device": controller_id,
+        "timestamp": payload.get("timestamp"),
+        "wifi_rssi": payload.get("wifi_rssi", 0),
+        "uptime_s": payload.get("uptime_s", 0),
+        "config_version": payload.get("config_version", 0),
+        "sig_state": payload.get("sig_state"),
+        "vehicle_count_source": "camera",
+        "sensor_mode": True,
+        "dummy_mode": False,
+    }
+    mode = payload.get("mode") or {}
+    flat["auto_mode"] = mode.get("auto", True)
+    flat["adaptive_mode"] = mode.get("adaptive", True)
+    vision = payload.get("vision") or {}
+    flat["vision_fresh"] = vision.get("fresh", False)
+    for lane, st in (payload.get("approaches") or {}).items():
+        if not isinstance(st, dict):
+            continue
+        flat[f"{lane}_vehicle_count"] = st.get("camera_vehicle_count", 0)
+        flat[f"{lane}_vehicle_detected"] = st.get("ir_occupied", False)
+        flat[f"{lane}_distance_cm"] = 0
+        flat[f"{lane}_density_level"] = st.get("sensor_level", 0)
+        flat[f"{lane}_queue_detected"] = st.get("sensor_level", 0) >= 2
+        flat[f"{lane}_queue_estimate_cm"] = st.get("camera_queue_count", 0)
+        flat[f"{lane}_light"] = st.get("light", "red")
+        flat[f"{lane}_green_duration_s"] = st.get("green_duration_s", 0)
+        flat[f"{lane}_ultrasonic_detected"] = st.get("ultrasonic_occupied", False)
+    return flat
+
+
+_vision_last_saved: Dict[str, Any] = {}
+
+
+def should_persist_vision(intersection_id: str, payload: Dict[str, Any]) -> bool:
+    """Persistensi sampled §74: berubah bermakna ATAU tiap VISION_SAMPLE_SECONDS."""
+    import time as _time
+
+    now = _time.time()
+    key = str(intersection_id)
+    prev = _vision_last_saved.get(key)
+    summary = json.dumps(payload.get("approaches", {}), sort_keys=True)
+    if prev is None:
+        _vision_last_saved[key] = {"at": now, "summary": summary}
+        return True
+    if summary != prev["summary"]:
+        _vision_last_saved[key] = {"at": now, "summary": summary}
+        return True
+    if now - prev["at"] >= VISION_SAMPLE_SECONDS:
+        _vision_last_saved[key] = {"at": now, "summary": summary}
+        return True
+    return False
+
+
+def process_vision_metrics(topic: str, payload: Dict[str, Any]) -> None:
+    parts = topic.split("/")
+    intersection_id = parts[3] if len(parts) > 3 else payload.get("intersection_id")
+    if not should_persist_vision(str(intersection_id), payload):
+        return
+    document = build_document({
+        "device_id": f"VISION_{intersection_id}",
+        "device": f"VISION_{intersection_id}",
+        "intersection_id": intersection_id,
+        "timestamp": payload.get("generated_at"),
+        "source": "astraea-vision-sampled",
+        "vision_metrics": payload.get("approaches", {}),
+    })
+    try:
+        s3_key = save_to_s3(document)
+        print(f"Sampled vision persisted: {intersection_id} -> {s3_key}")
+    except Exception as exc:
+        print("ERROR persisting vision sample:", exc)
+
+
 def process_payload(payload_text: str, topic: str = "") -> None:
     print("\nMQTT message received:")
     if topic:
@@ -978,6 +1093,12 @@ def process_payload(payload_text: str, topic: str = "") -> None:
     if device_id_from_topic:
         payload["device_id"] = payload.get("device_id") or device_id_from_topic
         payload["device"] = payload.get("device") or device_id_from_topic
+    elif is_canonical_telemetry_topic(topic):
+        print("Canonical telemetry -> normalisasi ke pipeline legacy.")
+        payload = normalize_canonical_telemetry(topic, payload)
+    elif is_canonical_vision_topic(topic):
+        process_vision_metrics(topic, payload)
+        return
 
     try:
         document = build_document(payload)
@@ -1012,8 +1133,12 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     print("MQTT connected")
     print(f"Reason code: {reason_code}")
     print(f"Subscribing to topic: {MQTT_TOPIC}")
+    print(f"Subscribing to topic: {MQTT_TOPIC_V1_TELEMETRY}")
+    print(f"Subscribing to topic: {MQTT_TOPIC_V1_VISION}")
 
     client.subscribe(MQTT_TOPIC, qos=0)
+    client.subscribe(MQTT_TOPIC_V1_TELEMETRY, qos=0)
+    client.subscribe(MQTT_TOPIC_V1_VISION, qos=0)
 
 
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
@@ -1042,6 +1167,8 @@ def main():
     print(f"MQTT_HOST={MQTT_HOST}")
     print(f"MQTT_PORT={MQTT_PORT}")
     print(f"MQTT_TOPIC={MQTT_TOPIC}")
+    print(f"MQTT_TOPIC_V1_TELEMETRY={MQTT_TOPIC_V1_TELEMETRY}")
+    print(f"MQTT_TOPIC_V1_VISION={MQTT_TOPIC_V1_VISION} (sampled {VISION_SAMPLE_SECONDS}s)")
     print(f"AWS_REGION={AWS_REGION}")
     print(f"DYNAMODB_TABLE={DYNAMODB_TABLE}")
     print(f"DYNAMODB_DEVICE_STATUS_TABLE={DYNAMODB_DEVICE_STATUS_TABLE}")
