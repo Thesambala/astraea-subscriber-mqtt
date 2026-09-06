@@ -5,8 +5,9 @@ MQTT subscriber: ESP32/CAM_YOLO → DynamoDB + S3 + Telegram/Email.
 1. COMMIT + PUSH SETIAP PERUBAHAN: setiap file yang diubah/ditambah (kode, config, docs)
    WAJIB di-`git commit` dan `git push` ke branch yang sama sebelum sesi/pekerjaan selesai.
    Dilarang menumpuk perubahan tanpa push.
-2. JANGAN COMMIT SECRET: `.env`, `*.pem`, `*.key`, `passwd`, token, password.
-   Hanya file template `.example` yang boleh masuk repo. (Repo ini PUBLIC.)
+2. SECRET & ENV: semua repo kini PRIVATE — file `.env` WAJIB ikut di-commit+push
+   agar config tidak hilang (pengecualian dari aturan umum, berlaku selama repo private).
+   DILARANG menjadikan repo ini public. Jangan paste secret di issue/komentar.
 3. FILE PRODUKSI: `subscriber_aws.py` adalah file yang jalan di server via systemd
    `traffic-aws-subscriber` (`/home/ubuntu/traffic-aws-subscriber`, EC2 `astraea-web-mqtt`).
    File `subscriber_aws2..5.py` adalah arsip/percobaan — jangan hapus tanpa konfirmasi.
