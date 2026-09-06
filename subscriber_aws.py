@@ -1030,13 +1030,17 @@ def normalize_canonical_telemetry(topic: str, payload: Dict[str, Any]) -> Dict[s
 
 
 _vision_last_saved: Dict[str, Any] = {}
+# E3: controller v2 mengirim kanonis + legacy untuk heartbeat yang sama.
+# Prefer kanonis; buang legacy bila kanonis controller tsb terlihat <= 6 dtk.
+_canon_last_seen: Dict[str, float] = {}
+DEDUP_WINDOW_S = 6.0
 
 
 def should_persist_vision(intersection_id: str, payload: Dict[str, Any]) -> bool:
     """Persistensi sampled §74: berubah bermakna ATAU tiap VISION_SAMPLE_SECONDS."""
     import time as _time
 
-    now = _time.time()
+    now = time.time()
     key = str(intersection_id)
     prev = _vision_last_saved.get(key)
     summary = json.dumps(payload.get("approaches", {}), sort_keys=True)
@@ -1091,11 +1095,17 @@ def process_payload(payload_text: str, topic: str = "") -> None:
     device_id_from_topic = extract_device_id_from_topic(topic)
 
     if device_id_from_topic:
+        key = f"{payload.get('intersection_id', '')}|{device_id_from_topic}"
+        if time.time() - _canon_last_seen.get(key, 0) <= DEDUP_WINDOW_S:
+            print(f"Dedup: legacy {device_id_from_topic} dibuang (kanonis fresh).")
+            return
         payload["device_id"] = payload.get("device_id") or device_id_from_topic
         payload["device"] = payload.get("device") or device_id_from_topic
     elif is_canonical_telemetry_topic(topic):
         print("Canonical telemetry -> normalisasi ke pipeline legacy.")
         payload = normalize_canonical_telemetry(topic, payload)
+        key = f"{payload.get('intersection_id', '')}|{payload.get('device_id', '')}"
+        _canon_last_seen[key] = time.time()
     elif is_canonical_vision_topic(topic):
         process_vision_metrics(topic, payload)
         return
