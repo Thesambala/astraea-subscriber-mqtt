@@ -207,6 +207,40 @@ def build_document(payload: Dict[str, Any]) -> Dict[str, Any]:
             payload.get(f"{lane}_green_duration_s"),
             document["green_time_s"],
         )
+        # Extra v2.1 (backward-compatible: payload legacy tidak punya → default lama).
+        # count_valid default True = asumsi lama "count selalu valid".
+        document[f"{lane}_count_valid"] = normalize_bool(
+            payload.get(f"{lane}_count_valid"), True
+        )
+        document[f"{lane}_count_source"] = str(payload.get(f"{lane}_count_source") or "")
+        document[f"{lane}_vision_fresh"] = normalize_bool(
+            payload.get(f"{lane}_vision_fresh"), False
+        )
+        if payload.get(f"{lane}_recommended_green_s") is not None:
+            try:
+                document[f"{lane}_recommended_green_s"] = float(
+                    payload.get(f"{lane}_recommended_green_s")
+                )
+            except (TypeError, ValueError):
+                pass
+        if payload.get(f"{lane}_effective_green_s") is not None:
+            try:
+                document[f"{lane}_effective_green_s"] = float(
+                    payload.get(f"{lane}_effective_green_s")
+                )
+            except (TypeError, ValueError):
+                pass
+
+    # Extra top-level v2.1 (aman untuk legacy: default netral).
+    document["mode_degraded"] = normalize_bool(payload.get("mode_degraded"), False)
+    document["vision_state"] = str(payload.get("vision_state") or "UNKNOWN")
+    document["vision_fresh_lanes"] = normalize_int(payload.get("vision_fresh_lanes"), 0)
+    document["vision_fresh"] = normalize_bool(payload.get("vision_fresh"), False)
+    document["firmware_version"] = str(payload.get("firmware_version") or "")
+    document["active_lane"] = str(payload.get("active_lane") or "")
+    if payload.get("sig_state") is not None:
+        document["sig_state"] = payload.get("sig_state")
+    document["config_version"] = normalize_int(payload.get("config_version"), 0)
 
     return document
 
@@ -991,10 +1025,28 @@ def is_canonical_vision_topic(topic: str) -> bool:
 
 
 def normalize_canonical_telemetry(topic: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Skema kanonis §27 -> bentuk legacy agar pipeline sama (DynamoDB/S3/notif)."""
+    """Skema kanonis v2.1 (§27/F17) -> bentuk flat agar pipeline sama.
+
+    Aturan semantik (F3):
+    - camera_queue_count (KENDARAAN) -> queue_vehicles. TIDAK PERNAH ke cm.
+    - queue_estimate_cm kanonis tidak ada -> 0, jangan mengarang.
+    - recommended_green_s (fuzzy) vs effective_green_s (aktual) dipisah;
+      green_duration_s = effective (kompat dashboard lama = durasi aktual).
+    - vehicle_count_valid/source dipertahankan; stale -> source vision_stale.
+    - distance_cm = ultrasonic, dipertahankan.
+    - vision: state + fresh_lane_count + {lane}_fresh (BUKAN vision[fresh]).
+    """
     parts = topic.split("/")
     intersection_id = parts[3] if len(parts) > 3 else payload.get("intersection_id")
     controller_id = parts[5] if len(parts) > 5 else payload.get("controller_id")
+    mode = payload.get("mode") or {}
+    vision = payload.get("vision") or {}
+    fresh_lanes = normalize_int(vision.get("fresh_lane_count"), 0)
+    lane_fresh = {
+        "north": normalize_bool(vision.get("north_fresh"), False),
+        "south": normalize_bool(vision.get("south_fresh"), False),
+        "east": normalize_bool(vision.get("east_fresh"), False),
+    }
     flat: Dict[str, Any] = {
         "schema_version": payload.get("schema_version", 1),
         "intersection_id": intersection_id,
@@ -1004,28 +1056,42 @@ def normalize_canonical_telemetry(topic: str, payload: Dict[str, Any]) -> Dict[s
         "wifi_rssi": payload.get("wifi_rssi", 0),
         "uptime_s": payload.get("uptime_s", 0),
         "config_version": payload.get("config_version", 0),
-        "sig_state": payload.get("sig_state"),
+        "sig_state": payload.get("sig_state", ""),
+        "firmware_version": payload.get("firmware_version", ""),
+        "active_lane": payload.get("active_lane", ""),
         "vehicle_count_source": "camera",
         "sensor_mode": True,
         "dummy_mode": False,
+        "auto_mode": normalize_bool(mode.get("auto"), True),
+        "adaptive_mode": normalize_bool(mode.get("adaptive"), True),
+        "mode_degraded": normalize_bool(mode.get("degraded"), False),
+        "vision_state": str(vision.get("state") or "UNKNOWN"),
+        "vision_fresh_lanes": fresh_lanes,
+        "vision_fresh": fresh_lanes > 0,
     }
-    mode = payload.get("mode") or {}
-    flat["auto_mode"] = mode.get("auto", True)
-    flat["adaptive_mode"] = mode.get("adaptive", True)
-    vision = payload.get("vision") or {}
-    flat["vision_fresh"] = vision.get("fresh", False)
-    for lane, st in (payload.get("approaches") or {}).items():
+    approaches = payload.get("approaches") or {}
+    for lane in ("north", "south", "east"):
+        st = approaches.get(lane)
         if not isinstance(st, dict):
-            continue
+            st = {}
         flat[f"{lane}_vehicle_count"] = st.get("camera_vehicle_count", 0)
+        flat[f"{lane}_queue_vehicles"] = st.get("camera_queue_count", 0)
+        flat[f"{lane}_queue_estimate_cm"] = 0  # kanonis tak punya cm; jangan karang
+        flat[f"{lane}_count_valid"] = st.get("vehicle_count_valid", False)
+        flat[f"{lane}_count_source"] = st.get("vehicle_count_source", "")
+        flat[f"{lane}_vision_fresh"] = lane_fresh.get(lane, False)
         flat[f"{lane}_vehicle_detected"] = st.get("ir_occupied", False)
-        flat[f"{lane}_distance_cm"] = 0
+        flat[f"{lane}_distance_cm"] = st.get("distance_cm", 0)
         flat[f"{lane}_density_level"] = st.get("sensor_level", 0)
         flat[f"{lane}_queue_detected"] = st.get("sensor_level", 0) >= 2
-        flat[f"{lane}_queue_estimate_cm"] = st.get("camera_queue_count", 0)
         flat[f"{lane}_light"] = st.get("light", "red")
-        flat[f"{lane}_green_duration_s"] = st.get("green_duration_s", 0)
         flat[f"{lane}_ultrasonic_detected"] = st.get("ultrasonic_occupied", False)
+        if st.get("recommended_green_s") is not None:
+            flat[f"{lane}_recommended_green_s"] = st.get("recommended_green_s")
+        eff = st.get("effective_green_s", st.get("green_duration_s"))
+        if eff is not None:
+            flat[f"{lane}_green_duration_s"] = eff
+            flat[f"{lane}_effective_green_s"] = eff
     return flat
 
 
@@ -1034,6 +1100,15 @@ _vision_last_saved: Dict[str, Any] = {}
 # Prefer kanonis; buang legacy bila kanonis controller tsb terlihat <= 6 dtk.
 _canon_last_seen: Dict[str, float] = {}
 DEDUP_WINDOW_S = 6.0
+
+
+def mark_canonical_seen(intersection_id: str, device_id: str, now: float) -> None:
+    _canon_last_seen[f"{intersection_id}|{device_id}"] = now
+
+
+def should_drop_legacy(intersection_id: str, device_id: str, now: float) -> bool:
+    """E3: buang legacy bila kanonis controller yang sama terlihat dalam window."""
+    return now - _canon_last_seen.get(f"{intersection_id}|{device_id}", 0) <= DEDUP_WINDOW_S
 
 
 def should_persist_vision(intersection_id: str, payload: Dict[str, Any]) -> bool:
@@ -1096,7 +1171,9 @@ def process_payload(payload_text: str, topic: str = "") -> None:
 
     if device_id_from_topic:
         key = f"{payload.get('intersection_id', '')}|{device_id_from_topic}"
-        if time.time() - _canon_last_seen.get(key, 0) <= DEDUP_WINDOW_S:
+        if should_drop_legacy(
+            str(payload.get("intersection_id", "")), device_id_from_topic, time.time()
+        ):
             print(f"Dedup: legacy {device_id_from_topic} dibuang (kanonis fresh).")
             return
         payload["device_id"] = payload.get("device_id") or device_id_from_topic
@@ -1104,8 +1181,11 @@ def process_payload(payload_text: str, topic: str = "") -> None:
     elif is_canonical_telemetry_topic(topic):
         print("Canonical telemetry -> normalisasi ke pipeline legacy.")
         payload = normalize_canonical_telemetry(topic, payload)
-        key = f"{payload.get('intersection_id', '')}|{payload.get('device_id', '')}"
-        _canon_last_seen[key] = time.time()
+        mark_canonical_seen(
+            str(payload.get("intersection_id", "")),
+            str(payload.get("device_id", "")),
+            time.time(),
+        )
     elif is_canonical_vision_topic(topic):
         process_vision_metrics(topic, payload)
         return
