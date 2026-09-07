@@ -87,3 +87,34 @@ def test_dedup_prefers_canonical():
     assert sub.should_drop_legacy("I", "C", 1010.0) is False
     assert sub.should_drop_legacy("I", "OTHER", 1003.0) is False
     assert sub.should_drop_legacy("J", "C", 1003.0) is False
+
+
+def _payload_all_fresh():
+    p = canon_payload()
+    p["vision"] = {"state": "NORMAL", "fresh_lane_count": 3,
+                   "north_fresh": True, "south_fresh": True, "east_fresh": True}
+    p["approaches"]["south"] = dict(p["approaches"]["north"])
+    p["approaches"]["east"] = dict(p["approaches"]["north"])
+    return p
+
+
+def _payload_none_fresh():
+    p = canon_payload()
+    p["vision"] = {"state": "FALLBACK", "fresh_lane_count": 0,
+                   "north_fresh": False, "south_fresh": False, "east_fresh": False}
+    return p
+
+
+def test_source_all_fresh_camera():
+    flat = sub.normalize_canonical_telemetry(TOPIC, _payload_all_fresh())
+    assert flat["vehicle_count_source"] == "camera"
+
+
+def test_source_partial_mixed():
+    flat = sub.normalize_canonical_telemetry(TOPIC, canon_payload())
+    assert flat["vehicle_count_source"] == "mixed"
+
+
+def test_source_none_stale():
+    flat = sub.normalize_canonical_telemetry(TOPIC, _payload_none_fresh())
+    assert flat["vehicle_count_source"] == "vision_stale"

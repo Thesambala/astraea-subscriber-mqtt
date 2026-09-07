@@ -1059,7 +1059,6 @@ def normalize_canonical_telemetry(topic: str, payload: Dict[str, Any]) -> Dict[s
         "sig_state": payload.get("sig_state", ""),
         "firmware_version": payload.get("firmware_version", ""),
         "active_lane": payload.get("active_lane", ""),
-        "vehicle_count_source": "camera",
         "sensor_mode": True,
         "dummy_mode": False,
         "auto_mode": normalize_bool(mode.get("auto"), True),
@@ -1092,6 +1091,16 @@ def normalize_canonical_telemetry(topic: str, payload: Dict[str, Any]) -> Dict[s
         if eff is not None:
             flat[f"{lane}_green_duration_s"] = eff
             flat[f"{lane}_effective_green_s"] = eff
+    # I: top-level source jujur dari freshness per-lane (BUKAN hardcode camera).
+    fresh_count = sum(
+        1 for lane in ("north", "south", "east") if flat.get(f"{lane}_vision_fresh")
+    )
+    if fresh_count == 3:
+        flat["vehicle_count_source"] = "camera"
+    elif fresh_count == 0:
+        flat["vehicle_count_source"] = "vision_stale"
+    else:
+        flat["vehicle_count_source"] = "mixed"
     return flat
 
 
